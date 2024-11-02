@@ -1,4 +1,3 @@
-# At the top of your streamlit_app.py
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -6,7 +5,6 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import requests
 import time
-from bs4 import BeautifulSoup
 import json
 
 # Configure page
@@ -16,61 +14,57 @@ st.set_page_config(
     layout="wide"
 )
 
-# Define headers for SEC EDGAR
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+# Properly formatted SEC headers
+HEADERS = {
+    'User-Agent': 'Rahul Bakshi (rahul.bakshi@tradesforce.ai)',
+    'Accept-Encoding': 'gzip, deflate',
+    'Host': 'www.sec.gov'
 }
 
-# Test connection to SEC
+# Add rate limiting
+def sec_request(url):
+    """Make request to SEC with proper rate limiting"""
+    time.sleep(0.1)  # SEC rate limit
+    return requests.get(url, headers=HEADERS)
+
+# Test SEC connection
 def test_sec_connection():
     try:
-        response = requests.get(
-            'https://www.sec.gov/files/company_tickers.json',
-            headers=headers
-        )
+        response = sec_request('https://www.sec.gov/files/company_tickers.json')
         if response.status_code == 200:
             return True
         else:
             st.error(f"SEC connection error: Status code {response.status_code}")
+            st.write("Response headers:", dict(response.headers))
             return False
     except Exception as e:
         st.error(f"SEC connection error: {str(e)}")
         return False
 
-# Function to get company info
+# Get company info
 @st.cache_data(ttl=3600)
 def get_company_info(ticker):
     try:
-        # Get CIK from ticker lookup
-        response = requests.get(
-            'https://www.sec.gov/files/company_tickers.json',
-            headers=headers
-        )
+        response = sec_request('https://www.sec.gov/files/company_tickers.json')
         data = response.json()
         
-        # Find the matching ticker
         for entry in data.values():
             if entry['ticker'] == ticker.upper():
-                cik = str(entry['cik_str']).zfill(10)
-                name = entry['title']
-                return {'cik': cik, 'name': name}
-        
+                return {
+                    'cik': str(entry['cik_str']).zfill(10),
+                    'name': entry['title']
+                }
         return None
     except Exception as e:
         st.error(f"Error looking up company: {str(e)}")
         return None
 
-# Function to get filings
+# Get company filings
 @st.cache_data(ttl=3600)
 def get_company_filings(cik, filing_type, days_back):
     try:
-        # Calculate date range
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days_back)
-        
-        # Get company filings
         url = f'https://data.sec.gov/submissions/CIK{cik}.json'
-        response = requests.get(url, headers=headers)
+        response = sec_request(url)
         
         if response.status_code != 200:
             st.error(f"Error fetching filings: Status code {response.status_code}")
@@ -79,7 +73,10 @@ def get_company_filings(cik, filing_type, days_back):
         data = response.json()
         filings = []
         
-        # Process recent filings
+        # Calculate date range
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
+        
         recent_filings = data['filings']['recent']
         for i, form in enumerate(recent_filings['form']):
             if form == filing_type:
@@ -117,7 +114,8 @@ def main():
         return
 
     # Get company info
-    company = get_company_info(ticker)
+    with st.spinner("Looking up company information..."):
+        company = get_company_info(ticker)
     
     if not company:
         st.error(f"Could not find company information for ticker {ticker}")
@@ -127,7 +125,8 @@ def main():
     st.header(f"{ticker} - {company['name']}")
     
     # Get filings
-    filings = get_company_filings(company['cik'], filing_type, days_back)
+    with st.spinner("Fetching SEC filings..."):
+        filings = get_company_filings(company['cik'], filing_type, days_back)
     
     if not filings:
         st.info(f"No {filing_type} filings found for {ticker} in the past {days_back} days.")
@@ -136,21 +135,32 @@ def main():
     # Display filings
     st.subheader(f"Recent {filing_type} Filings")
     
+    # Get stock data
+    with st.spinner("Fetching stock data..."):
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
+        stock = yf.Ticker(ticker)
+        stock_data = stock.history(start=start_date)
+        
+        if not stock_data.empty:
+            fig = px.line(stock_data, y='Close',
+                         title=f'{ticker} Stock Price',
+                         template='plotly_white')
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Display filings
     for filing in filings:
         with st.expander(f"{filing['form']} - Filed on {filing['date']}", expanded=False):
             st.write(f"**Filing Date:** {filing['date']}")
             st.write(f"**Document:** {filing['primaryDocument']}")
             st.markdown(f"[View Filing on SEC.gov]({filing['reportUrl']})")
-            
-            # Add a download button for the filing URL
-            st.markdown(f"[Download Filing]({filing['reportUrl']})")
 
-    # Add export option for all filings
+    # Add export option
     if filings:
         df = pd.DataFrame(filings)
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            "📥 Download All Filings Data",
+            "📥 Download Filings Data",
             csv,
             f"{ticker}_filings.csv",
             "text/csv"
@@ -171,4 +181,4 @@ if __name__ == "__main__":
     if test_sec_connection():
         main()
     else:
-        st.error("Unable to connect to SEC EDGAR. Please try again later.")
+        st.error("Please check the console for detailed error information.")
