@@ -89,27 +89,38 @@ def analyze_filing_content(url):
         return None
 
 def display_metrics(metrics, sentiment):
-    """Display extracted metrics in Streamlit"""
+    """Display extracted metrics in Streamlit with proper error handling"""
     if metrics:
         col1, col2 = st.columns(2)
         
         with col1:
             st.subheader("📊 Key Financial Metrics")
             for metric_name, values in metrics.items():
-                if values:
-                    avg_value = np.mean(values)
-                    st.metric(
-                        label=metric_name.replace('_', ' ').title(),
-                        value=f"${avg_value:,.2f}"
-                    )
+                if values and len(values) > 0 and any(v is not None for v in values):
+                    # Filter out None values and calculate mean
+                    valid_values = [v for v in values if v is not None]
+                    if valid_values:
+                        avg_value = np.mean(valid_values)
+                        st.metric(
+                            label=metric_name.replace('_', ' ').title(),
+                            value=f"${avg_value:,.2f}"
+                        )
+                    else:
+                        st.metric(
+                            label=metric_name.replace('_', ' ').title(),
+                            value="Not found"
+                        )
         
         with col2:
             st.subheader("📈 Sentiment Analysis")
-            sentiment_color = 'green' if sentiment['polarity'] > 0 else 'red'
-            st.markdown(f"""
-                Sentiment Polarity: <span style='color:{sentiment_color}'>{sentiment['polarity']:.2f}</span>
-                \nSubjectivity: {sentiment['subjectivity']:.2f}
-            """, unsafe_allow_html=True)
+            if isinstance(sentiment, dict) and 'polarity' in sentiment:
+                sentiment_color = 'green' if sentiment['polarity'] > 0 else 'red'
+                st.markdown(f"""
+                    Sentiment Polarity: <span style='color:{sentiment_color}'>{sentiment['polarity']:.2f}</span>
+                    \nSubjectivity: {sentiment['subjectivity']:.2f}
+                """, unsafe_allow_html=True)
+            else:
+                st.write("Sentiment analysis not available")
 
 # Keep your existing helper functions (sec_request, get_company_info, get_filings)
 def sec_request(url):
@@ -227,6 +238,25 @@ def main():
             fig = px.line(hist, y='Close', title=f'{ticker} Stock Price')
             st.plotly_chart(fig, use_container_width=True)
 
+    # Define the analysis DataFrame creation function
+    def create_analysis_dataframe(metrics):
+        """Create analysis DataFrame with proper error handling"""
+        try:
+            metric_values = []
+            for metric in ['revenue', 'net_income', 'eps', 'operating_income', 'cash_flow']:
+                values = metrics.get(metric, [])
+                valid_values = [v for v in values if v is not None]
+                avg_value = np.mean(valid_values) if valid_values else 0
+                metric_values.append(avg_value)
+            
+            return pd.DataFrame({
+                'Metric': ['Revenue', 'Net Income', 'EPS', 'Operating Income', 'Cash Flow'],
+                'Value': metric_values
+            })
+        except Exception as e:
+            st.error(f"Error creating analysis summary: {str(e)}")
+            return pd.DataFrame()
+
     # Display filings with enhanced analysis
     st.subheader(f"Recent {filing_type} Filings")
     for filing in filings:
@@ -243,24 +273,16 @@ def main():
                     display_metrics(analysis['metrics'], analysis['sentiment'])
                     
                     # Add download option for analysis
-                    analysis_df = pd.DataFrame({
-                        'Metric': ['Revenue', 'Net Income', 'EPS', 'Operating Income', 'Cash Flow'],
-                        'Value': [
-                            np.mean(analysis['metrics'].get('revenue', [0])),
-                            np.mean(analysis['metrics'].get('net_income', [0])),
-                            np.mean(analysis['metrics'].get('eps', [0])),
-                            np.mean(analysis['metrics'].get('operating_income', [0])),
-                            np.mean(analysis['metrics'].get('cash_flow', [0]))
-                        ]
-                    })
+                    analysis_df = create_analysis_dataframe(analysis['metrics'])
+                    if not analysis_df.empty:
+                        csv = analysis_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            "📥 Download Analysis",
+                            csv,
+                            f"{filing['form']}_{filing['date']}_analysis.csv",
+                            "text/csv"
+                        )
                     
-                    csv = analysis_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        "📥 Download Analysis",
-                        csv,
-                        f"{filing['form']}_{filing['date']}_analysis.csv",
-                        "text/csv"
-                    )
 
     # Export option for all filings
     if filings:
