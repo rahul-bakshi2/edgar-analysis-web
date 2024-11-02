@@ -3,5 +3,3 @@ pandas
 requests
 yfinance
 plotly
-beautifulsoup4
-python-dotenv
