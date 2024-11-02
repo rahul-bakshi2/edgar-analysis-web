@@ -6,6 +6,12 @@ from datetime import datetime, timedelta
 import requests
 import time
 import json
+# Add these new imports
+from bs4 import BeautifulSoup
+import re
+from collections import defaultdict
+import numpy as np
+from textblob import TextBlob
 
 # Configure page
 st.set_page_config(
@@ -20,12 +26,97 @@ HEADERS = {
     'Accept-Encoding': 'gzip, deflate'
 }
 
+# Add the new FinancialMetricsExtractor class here
+class FinancialMetricsExtractor:
+    def __init__(self):
+        # Common financial metrics patterns
+        self.metrics_patterns = {
+            'revenue': r'(?i)(total revenue|net revenue|revenue)[:\s]*[$]?[\d,]+\.?\d*\s*(?:million|billion|thousand|m|b|k)?',
+            'net_income': r'(?i)(net income|net earnings)[:\s]*[$]?[\d,]+\.?\d*\s*(?:million|billion|thousand|m|b|k)?',
+            'eps': r'(?i)(earnings per share|eps)[:\s]*[$]?[\d,]+\.?\d*',
+            'operating_income': r'(?i)(operating income)[:\s]*[$]?[\d,]+\.?\d*\s*(?:million|billion|thousand|m|b|k)?',
+            'cash_flow': r'(?i)(operating cash flow)[:\s]*[$]?[\d,]+\.?\d*\s*(?:million|billion|thousand|m|b|k)?'
+        }
+
+    def extract_metrics(self, text):
+        metrics = defaultdict(list)
+        for metric_name, pattern in self.metrics_patterns.items():
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                number_str = re.search(r'[$]?[\d,]+\.?\d*', match.group(0))
+                if number_str:
+                    value = self._parse_number(number_str.group(0))
+                    metrics[metric_name].append(value)
+        return metrics
+
+    def _parse_number(self, number_str):
+        try:
+            cleaned = number_str.replace('$', '').replace(',', '')
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    def analyze_sentiment(self, text):
+        blob = TextBlob(text)
+        return {
+            'polarity': blob.sentiment.polarity,
+            'subjectivity': blob.sentiment.subjectivity
+        }
+
+# Add the metrics analysis functions
+@st.cache_data(ttl=3600)
+def analyze_filing_content(url):
+    """Analyze the content of a filing"""
+    try:
+        response = requests.get(url, headers=HEADERS)
+        if response.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        text = soup.get_text()
+        
+        metrics_extractor = FinancialMetricsExtractor()
+        metrics = metrics_extractor.extract_metrics(text)
+        sentiment = metrics_extractor.analyze_sentiment(text)
+        
+        return {
+            'metrics': metrics,
+            'sentiment': sentiment,
+            'text_length': len(text)
+        }
+    except Exception as e:
+        st.error(f"Error analyzing filing: {str(e)}")
+        return None
+
+def display_metrics(metrics, sentiment):
+    """Display extracted metrics in Streamlit"""
+    if metrics:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Key Financial Metrics")
+            for metric_name, values in metrics.items():
+                if values:
+                    avg_value = np.mean(values)
+                    st.metric(
+                        label=metric_name.replace('_', ' ').title(),
+                        value=f"${avg_value:,.2f}"
+                    )
+        
+        with col2:
+            st.subheader("📈 Sentiment Analysis")
+            sentiment_color = 'green' if sentiment['polarity'] > 0 else 'red'
+            st.markdown(f"""
+                Sentiment Polarity: <span style='color:{sentiment_color}'>{sentiment['polarity']:.2f}</span>
+                \nSubjectivity: {sentiment['subjectivity']:.2f}
+            """, unsafe_allow_html=True)
+
+# Keep your existing helper functions (sec_request, get_company_info, get_filings)
 def sec_request(url):
     """Make request to SEC with proper rate limiting"""
     time.sleep(0.1)  # SEC rate limit
     return requests.get(url, headers=HEADERS)
 
-# Get company info
 @st.cache_data(ttl=3600)
 def get_company_info(ticker):
     try:
@@ -51,14 +142,11 @@ def get_company_info(ticker):
 def get_filings(ticker, filing_type, days_back):
     """Get filings using company API"""
     try:
-        # First get company info
         company = get_company_info(ticker)
         if not company:
             return []
 
         cik = company['cik']
-        
-        # Use company filings feed
         url = f'https://data.sec.gov/submissions/CIK{cik}.json'
         response = sec_request(url)
         
@@ -71,7 +159,6 @@ def get_filings(ticker, filing_type, days_back):
             st.error("Invalid response format from SEC")
             return []
 
-        # Filter filings
         filings = []
         recent = data['filings']['recent']
         end_date = datetime.now()
@@ -81,7 +168,6 @@ def get_filings(ticker, filing_type, days_back):
             if recent['form'][i] == filing_type:
                 filing_date = datetime.strptime(recent['filingDate'][i], '%Y-%m-%d')
                 if start_date <= filing_date <= end_date:
-                    # Create filing URL
                     acc_no = recent['accessionNumber'][i].replace('-', '')
                     url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no}/{recent['primaryDocument'][i]}"
                     
@@ -141,7 +227,7 @@ def main():
             fig = px.line(hist, y='Close', title=f'{ticker} Stock Price')
             st.plotly_chart(fig, use_container_width=True)
 
-    # Display filings
+    # Display filings with enhanced analysis
     st.subheader(f"Recent {filing_type} Filings")
     for filing in filings:
         with st.expander(f"{filing_type} - Filed on {filing['date']}", expanded=False):
@@ -149,13 +235,39 @@ def main():
             if filing.get('description'):
                 st.write(f"**Report Date:** {filing['description']}")
             st.markdown(f"[View Filing on SEC.gov]({filing['url']})")
+            
+            # Add the new metrics analysis here
+            with st.spinner("Analyzing filing content..."):
+                analysis = analyze_filing_content(filing['url'])
+                if analysis:
+                    display_metrics(analysis['metrics'], analysis['sentiment'])
+                    
+                    # Add download option for analysis
+                    analysis_df = pd.DataFrame({
+                        'Metric': ['Revenue', 'Net Income', 'EPS', 'Operating Income', 'Cash Flow'],
+                        'Value': [
+                            np.mean(analysis['metrics'].get('revenue', [0])),
+                            np.mean(analysis['metrics'].get('net_income', [0])),
+                            np.mean(analysis['metrics'].get('eps', [0])),
+                            np.mean(analysis['metrics'].get('operating_income', [0])),
+                            np.mean(analysis['metrics'].get('cash_flow', [0]))
+                        ]
+                    })
+                    
+                    csv = analysis_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        "📥 Download Analysis",
+                        csv,
+                        f"{filing['form']}_{filing['date']}_analysis.csv",
+                        "text/csv"
+                    )
 
-    # Export option
+    # Export option for all filings
     if filings:
         df = pd.DataFrame(filings)
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            "📥 Download Filings Data",
+            "📥 Download All Filings Data",
             csv,
             f"{ticker}_filings.csv",
             "text/csv"
