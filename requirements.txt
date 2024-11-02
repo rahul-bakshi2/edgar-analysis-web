@@ -3,3 +3,6 @@ pandas
 requests
 yfinance
 plotly
+beautifulsoup4
+textblob
+numpy
