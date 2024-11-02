@@ -25,17 +25,24 @@ HEADERS = {
 def sec_request(url):
     """Make request to SEC with proper rate limiting"""
     time.sleep(0.1)  # SEC rate limit
-    return requests.get(url, headers=HEADERS)
+    try:
+        response = requests.get(url, headers=HEADERS)
+        if response.status_code == 429:  # Rate limit exceeded
+            time.sleep(10)  # Wait longer if rate limited
+            response = requests.get(url, headers=HEADERS)
+        return response
+    except Exception as e:
+        st.error(f"Request error: {str(e)}")
+        return None
 
 # Test SEC connection
 def test_sec_connection():
     try:
         response = sec_request('https://www.sec.gov/files/company_tickers.json')
-        if response.status_code == 200:
+        if response and response.status_code == 200:
             return True
         else:
-            st.error(f"SEC connection error: Status code {response.status_code}")
-            st.write("Response headers:", dict(response.headers))
+            st.error(f"SEC connection error: Status code {response.status_code if response else 'No response'}")
             return False
     except Exception as e:
         st.error(f"SEC connection error: {str(e)}")
@@ -46,12 +53,17 @@ def test_sec_connection():
 def get_company_info(ticker):
     try:
         response = sec_request('https://www.sec.gov/files/company_tickers.json')
+        if not response or response.status_code != 200:
+            return None
+            
         data = response.json()
         
         for entry in data.values():
             if entry['ticker'] == ticker.upper():
+                # Format CIK to 10 digits with leading zeros
+                cik = str(entry['cik_str']).zfill(10)
                 return {
-                    'cik': str(entry['cik_str']).zfill(10),
+                    'cik': cik,
                     'name': entry['title']
                 }
         return None
@@ -61,39 +73,53 @@ def get_company_info(ticker):
 
 # Get company filings
 @st.cache_data(ttl=3600)
-def get_company_filings(cik, filing_type, days_back):
+def get_company_filings(cik):
+    """Get all company filings from SEC API"""
     try:
+        # Ensure CIK is properly formatted
+        cik = str(cik).zfill(10)
         url = f'https://data.sec.gov/submissions/CIK{cik}.json'
+        
+        # Debug URL
+        st.write(f"Fetching data from: {url}")
+        
         response = sec_request(url)
-        
-        if response.status_code != 200:
-            st.error(f"Error fetching filings: Status code {response.status_code}")
-            return []
+        if not response or response.status_code != 200:
+            st.error(f"Error fetching filings: Status code {response.status_code if response else 'No response'}")
+            # Debug response
+            if response:
+                st.write("Response headers:", dict(response.headers))
+            return None
             
-        data = response.json()
-        filings = []
-        
-        # Calculate date range
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days_back)
-        
-        recent_filings = data['filings']['recent']
-        for i, form in enumerate(recent_filings['form']):
-            if form == filing_type:
-                filing_date = datetime.strptime(recent_filings['filingDate'][i], '%Y-%m-%d')
-                if start_date <= filing_date <= end_date:
-                    filings.append({
-                        'date': recent_filings['filingDate'][i],
-                        'accessionNumber': recent_filings['accessionNumber'][i],
-                        'form': form,
-                        'primaryDocument': recent_filings['primaryDocument'][i],
-                        'reportUrl': f"https://www.sec.gov/Archives/edgar/data/{cik}/{recent_filings['accessionNumber'][i].replace('-', '')}/{recent_filings['primaryDocument'][i]}"
-                    })
-        
-        return filings
+        return response.json()
     except Exception as e:
         st.error(f"Error processing filings: {str(e)}")
+        return None
+
+def filter_filings(filings_data, filing_type, days_back):
+    """Filter filings by type and date"""
+    if not filings_data or 'filings' not in filings_data:
         return []
+        
+    filtered_filings = []
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days_back)
+    
+    recent = filings_data['filings']['recent']
+    
+    for i, form in enumerate(recent['form']):
+        if form == filing_type:
+            filing_date = datetime.strptime(recent['filingDate'][i], '%Y-%m-%d')
+            if start_date <= filing_date <= end_date:
+                filtered_filings.append({
+                    'date': recent['filingDate'][i],
+                    'accessionNumber': recent['accessionNumber'][i],
+                    'form': form,
+                    'primaryDocument': recent['primaryDocument'][i],
+                    'reportUrl': f"https://www.sec.gov/Archives/edgar/data/{recent['cik'][i]}/{recent['accessionNumber'][i].replace('-', '')}/{recent['primaryDocument'][i]}"
+                })
+    
+    return filtered_filings
 
 def main():
     st.title("📊 SEC EDGAR Filing Analyzer")
@@ -123,10 +149,17 @@ def main():
 
     # Display company info
     st.header(f"{ticker} - {company['name']}")
+    st.write(f"CIK: {company['cik']}")
     
-    # Get filings
+    # Get all filings
     with st.spinner("Fetching SEC filings..."):
-        filings = get_company_filings(company['cik'], filing_type, days_back)
+        filings_data = get_company_filings(company['cik'])
+        if not filings_data:
+            st.error("Could not fetch filings data")
+            return
+            
+        # Filter filings
+        filings = filter_filings(filings_data, filing_type, days_back)
     
     if not filings:
         st.info(f"No {filing_type} filings found for {ticker} in the past {days_back} days.")
@@ -181,4 +214,4 @@ if __name__ == "__main__":
     if test_sec_connection():
         main()
     else:
-        st.error("Please check the console for detailed error information.")
+        st.error("Unable to connect to SEC EDGAR. Please try again later.")
