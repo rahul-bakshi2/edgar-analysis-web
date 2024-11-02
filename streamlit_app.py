@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from sec_api import QueryApi
 import plotly.express as px
 from datetime import datetime, timedelta
-import os
-from nltk.sentiment import SentimentIntensityAnalyzer
-import nltk
+import requests
 import time
+from bs4 import BeautifulSoup
+import json
 
 # Page configuration
 st.set_page_config(
@@ -17,80 +16,73 @@ st.set_page_config(
     menu_items={
         'Get Help': 'https://github.com/yourusername/edgar-analysis-web/issues',
         'Report a bug': 'https://github.com/yourusername/edgar-analysis-web/issues',
-        'About': 'EDGAR Filing Analysis Tool - Created by Your Name'
+        'About': 'EDGAR Filing Analysis Tool - Free and Open Source'
     }
 )
 
-# Display "How to Use" guide in the sidebar
-with st.sidebar:
-    with st.expander("ℹ️ How to Use"):
-        st.markdown("""
-        1. Enter a stock ticker (e.g., AAPL, MSFT)
-        2. Select the type of filing you want to analyze
-        3. Adjust the time range using the slider
-        4. View the analysis and charts
-        5. Download reports using the export button
-        
-        **Note:** If you encounter any issues, please report them using the ⋮ menu in the top right.
-        """)
-
-# Initialize NLTK and API
-@st.cache_resource
-def initialize_nltk():
-    try:
-        nltk.download('vader_lexicon', quiet=True)
-        return SentimentIntensityAnalyzer()
-    except Exception as e:
-        st.error("Error initializing sentiment analyzer. Please try again later.")
-        return None
-
-# Get API key from Streamlit secrets
-def get_api_key():
-    try:
-        return st.secrets["SEC_API_KEY"]
-    except Exception as e:
-        st.error("SEC API key not found. Please contact the administrator.")
-        return None
-
-# Initialize components
-sia = initialize_nltk()
-api_key = get_api_key()
-
-if api_key:
-    queryApi = QueryApi(api_key=api_key)
-else:
-    st.stop()
+# User agent header for SEC EDGAR
+HEADERS = {
+    'User-Agent': 'Your Name yourname@email.com',  # Replace with your information
+    'Accept-Encoding': 'gzip, deflate',
+    'Host': 'www.sec.gov'
+}
 
 class EDGARAnalyzer:
     @staticmethod
     @st.cache_data(ttl=3600)
-    def fetch_filings(ticker, filing_type, start_date):
-        """Fetch SEC filings with error handling"""
-        with st.spinner("Fetching SEC filings..."):
-            try:
-                query = {
-                    "query": {
-                        "query_string": {
-                            "query": f"ticker:{ticker} AND formType:\"{filing_type}\""
-                        }
-                    },
-                    "from": "0",
-                    "size": "10",
-                    "sort": [{"filedAt": {"order": "desc"}}]
-                }
-                response = queryApi.get_filings(query)
-                return response.get('filings', [])
-            except Exception as e:
-                st.error(f"Error fetching filings: Please check your ticker symbol and try again.")
-                return []
+    def get_cik_from_ticker(ticker):
+        """Get CIK number from ticker symbol"""
+        try:
+            # Use SEC's ticker to CIK lookup
+            response = requests.get(
+                f'https://www.sec.gov/files/company_tickers.json',
+                headers=HEADERS
+            )
+            time.sleep(0.1)  # SEC rate limit compliance
+            
+            if response.status_code == 200:
+                data = response.json()
+                for entry in data.values():
+                    if entry['ticker'] == ticker.upper():
+                        return str(entry['cik_str']).zfill(10)
+            return None
+        except Exception as e:
+            st.error(f"Error looking up company: {str(e)}")
+            return None
 
     @staticmethod
-    @st.cache_data
-    def analyze_sentiment(text):
-        """Analyze sentiment of text"""
-        if not text or not sia:
-            return {'pos': 0, 'neg': 0, 'neu': 0, 'compound': 0}
-        return sia.polarity_scores(text)
+    @st.cache_data(ttl=3600)
+    def fetch_company_submissions(cik):
+        """Fetch company filings metadata"""
+        try:
+            url = f'https://data.sec.gov/submissions/CIK{cik}.json'
+            response = requests.get(url, headers=HEADERS)
+            time.sleep(0.1)  # SEC rate limit compliance
+            
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            st.error(f"Error fetching company data: {str(e)}")
+            return None
+
+    @staticmethod
+    @st.cache_data(ttl=3600)
+    def get_filing_details(accession_number, cik):
+        """Fetch filing details from EDGAR"""
+        try:
+            # Format the accession number
+            acc_no = accession_number.replace('-', '')
+            url = f'https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no}/filing-details.json'
+            response = requests.get(url, headers=HEADERS)
+            time.sleep(0.1)  # SEC rate limit compliance
+            
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            st.error(f"Error fetching filing details: {str(e)}")
+            return None
 
     @staticmethod
     @st.cache_data(ttl=3600)
@@ -108,16 +100,30 @@ class EDGARAnalyzer:
             return pd.DataFrame()
 
 def main():
-    st.title("📊 EDGAR Filings Analysis Dashboard")
+    st.title("📊 SEC EDGAR Filing Analyzer")
     
+    # Sidebar help
+    with st.sidebar:
+        with st.expander("ℹ️ How to Use"):
+            st.markdown("""
+            1. Enter a stock ticker (e.g., AAPL, MSFT)
+            2. Select the type of filing you want to analyze
+            3. Adjust the time range using the slider
+            4. View the analysis and charts
+            5. Download reports using the export button
+            
+            This tool uses direct SEC EDGAR data and is completely free.
+            """)
+
     # Main interface
     col1, col2 = st.columns([3, 1])
     
     with col2:
         ticker = st.text_input("Enter Stock Ticker:", placeholder="e.g., AAPL, MSFT").upper()
+        filing_types = ["10-K", "10-Q", "8-K"]
         filing_type = st.selectbox(
             "Select Filing Type:",
-            ["10-K", "10-Q", "8-K"],
+            filing_types,
             help="10-K: Annual report\n10-Q: Quarterly report\n8-K: Material events"
         )
         days_back = st.slider(
@@ -130,12 +136,24 @@ def main():
         st.info("👆 Enter a stock ticker to begin analysis")
         return
 
-    # Initialize analyzer
+    # Initialize analyzer and get company data
     analyzer = EDGARAnalyzer()
-    start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+    cik = analyzer.get_cik_from_ticker(ticker)
+    
+    if not cik:
+        st.error(f"Could not find CIK for ticker {ticker}. Please verify the ticker symbol.")
+        return
+
+    # Fetch company submissions
+    submissions = analyzer.fetch_company_submissions(cik)
+    
+    if not submissions:
+        st.error("Could not fetch company filings. Please try again later.")
+        return
 
     # Stock Price Analysis
     with st.expander("📈 Stock Price Analysis", expanded=True):
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
         stock_data = analyzer.get_stock_data(ticker, start_date)
         if not stock_data.empty:
             fig = px.line(stock_data, y='Close',
@@ -145,49 +163,57 @@ def main():
 
     # Filings Analysis
     st.header("📑 SEC Filings Analysis")
-    filings = analyzer.fetch_filings(ticker, filing_type, start_date)
     
-    if filings:
-        # Create a list to store processed data for export
+    # Filter filings
+    recent_filings = []
+    start_date = datetime.now() - timedelta(days=days_back)
+    
+    for idx, form in enumerate(submissions['filings']['recent']['form']):
+        if form == filing_type:
+            filing_date = datetime.strptime(
+                submissions['filings']['recent']['filingDate'][idx],
+                '%Y-%m-%d'
+            )
+            if filing_date >= start_date:
+                recent_filings.append({
+                    'form': form,
+                    'filingDate': submissions['filings']['recent']['filingDate'][idx],
+                    'accessionNumber': submissions['filings']['recent']['accessionNumber'][idx],
+                    'primaryDocument': submissions['filings']['recent']['primaryDocument'][idx],
+                })
+
+    if recent_filings:
         processed_data = []
         
-        for filing in filings:
-            with st.expander(f"{filing['formType']} - {filing['filedAt'][:10]}", expanded=False):
-                col1, col2 = st.columns([3, 1])
+        for filing in recent_filings:
+            with st.expander(f"{filing['form']} - {filing['filingDate']}", expanded=False):
+                # Get filing details
+                details = analyzer.get_filing_details(filing['accessionNumber'], cik)
                 
-                with col1:
-                    description = filing.get('description', 'No description available')
-                    st.markdown("### Filing Details")
-                    st.write("**Description:**", description)
+                if details:
+                    col1, col2 = st.columns([3, 1])
                     
-                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{filing.get('cik', '')}/{filing.get('accessionNo', '').replace('-', '')}/{filing.get('primaryDocument', '')}"
-                    st.markdown(f"[View Full Filing]({filing_url})")
-                
-                with col2:
-                    if description != 'No description available':
-                        sentiment = analyzer.analyze_sentiment(description)
+                    with col1:
+                        st.markdown("### Filing Details")
                         
-                        # Create sentiment visualization
-                        fig = px.pie(
-                            values=[sentiment['pos'], sentiment['neu'], sentiment['neg']],
-                            names=['Positive', 'Neutral', 'Negative'],
-                            title='Sentiment Analysis',
-                            hole=0.4,
-                            color_discrete_map={
-                                'Positive': 'green',
-                                'Neutral': 'gray',
-                                'Negative': 'red'
-                            }
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                # Add to processed data
-                processed_data.append({
-                    'Date': filing['filedAt'][:10],
-                    'Type': filing['formType'],
-                    'Description': description,
-                    'Sentiment Score': sentiment['compound']
-                })
+                        # Display useful information from the filing
+                        if 'documentFormatFiles' in details:
+                            for doc in details['documentFormatFiles']:
+                                if doc.get('type') == '10-K' or doc.get('type') == '10-Q':
+                                    st.write("**Document Type:**", doc.get('type'))
+                                    st.write("**Description:**", doc.get('description', 'No description available'))
+                        
+                        # Create SEC filing URL
+                        filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{filing['accessionNumber'].replace('-', '')}/{filing['primaryDocument']}"
+                        st.markdown(f"[View Full Filing]({filing_url})")
+                    
+                    # Add to processed data
+                    processed_data.append({
+                        'Date': filing['filingDate'],
+                        'Type': filing['form'],
+                        'Document': filing['primaryDocument'],
+                        'URL': filing_url
+                    })
         
         # Export option
         if processed_data:
@@ -203,12 +229,12 @@ def main():
     else:
         st.info(f"No {filing_type} filings found for {ticker} in the selected time range.")
 
-    # Footer
+    # Footer with SEC attribution
     st.markdown("---")
     st.markdown(
         """
         <div style='text-align: center'>
-            <p>Built with Streamlit • Data from SEC EDGAR</p>
+            <p>Data sourced directly from SEC EDGAR • This tool is free and open source</p>
         </div>
         """,
         unsafe_allow_html=True
