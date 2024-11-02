@@ -1,0 +1,6 @@
+streamlit
+pandas
+nltk
+yfinance
+sec-api
+plotly
